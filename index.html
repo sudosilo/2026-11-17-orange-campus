@@ -105,7 +105,12 @@
   #topbar { position:absolute; top:10px; left:10px; right:10px; z-index:5; display:flex; gap:8px; align-items:center; }
   .pill { background:rgba(251,252,250,.94); color:var(--ink); border:0; border-radius:999px; padding:6px 12px;
     font-size:12px; font-weight:800; font-family:inherit; }
-  #ctxPill { max-width:56%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #ctxPill { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #darkBtn, #fullBtn { cursor:pointer; flex:none; }
+  #topbar #bankedPill { margin-left:0; flex:none; }
+  /* Screen off: pure black over everything while the lesson keeps playing. Tap to wake. */
+  #blackout { position:fixed; inset:0; z-index:100; background:#000; display:none; cursor:pointer; }
+  #blackout.show { display:block; }
   #menuBtn { cursor:pointer; }
   #bankedPill { margin-left:auto; background:var(--gold); color:#fff; }
   #info { position:absolute; left:0; right:0; bottom:60px; height:56px; background:var(--paper);
@@ -237,6 +242,8 @@
   <div id="topbar">
     <button class="pill" id="menuBtn">Home</button>
     <div class="pill" id="ctxPill">subject</div>
+    <button class="pill" id="darkBtn">Screen off</button>
+    <button class="pill" id="fullBtn">Full</button>
     <div class="pill" id="bankedPill">0 logged</div>
   </div>
   <div class="videoArea"><div id="frame"></div>
@@ -317,6 +324,9 @@
   <div class="genreTotals" id="genreTotals"></div>
   <div id="ledger"></div>
 </div>
+
+<!-- SCREEN OFF -->
+<div id="blackout" aria-label="Tap to wake the screen"></div>
 
 <!-- BOTTOM NAV -->
 <div id="nav">
@@ -834,6 +844,31 @@ $('junkBtn').addEventListener('click', ()=>{
 });
 $('doneBtn').addEventListener('click', ()=>{ try{player.pauseVideo();}catch(e){} openEndCard(); });
 $('menuBtn').addEventListener('click', goHome);
+
+// ----- screen off and fullscreen ------------------------------------------
+// Screen off covers the page in black and holds the screen awake so the phone
+// does not lock and pause the lesson. A tap anywhere brings it back.
+let wakeLock = null;
+async function holdAwake(){
+  try{ if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){ wakeLock = null; }
+}
+function releaseAwake(){ try{ if (wakeLock) wakeLock.release(); }catch(e){} wakeLock = null; }
+function screenOff(){ $('blackout').classList.add('show'); holdAwake(); }
+function screenOn(){ $('blackout').classList.remove('show'); releaseAwake(); }
+$('darkBtn').addEventListener('click', screenOff);
+$('blackout').addEventListener('click', screenOn);
+document.addEventListener('visibilitychange', ()=>{
+  if (document.visibilityState === 'visible' && $('blackout').classList.contains('show')) holdAwake();
+});
+// Fullscreen puts the video itself fullscreen. Swiping out of Firefox then
+// drops it into picture in picture.
+$('fullBtn').addEventListener('click', ()=>{
+  try{
+    const el = player && player.getIframe ? player.getIframe() : $('frame');
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+    if (req) req.call(el);
+  }catch(e){}
+});
 $('openYtBtn').addEventListener('click', openCurrentOnYouTube);
 $('messageBackBtn').addEventListener('click', goHome);
 
@@ -1022,6 +1057,7 @@ async function toggleEntries(row, bucket, genre){
 
 // ----- shared --------------------------------------------------------------
 function goHome(){
+  screenOn();
   if ($('player').classList.contains('show') && nowPlaying){
     try{ saveLast({ t: Math.floor(player.getCurrentTime() || 0), dur: Math.floor(player.getDuration() || 0) }); }catch(e){}
   }
