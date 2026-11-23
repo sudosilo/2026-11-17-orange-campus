@@ -117,6 +117,7 @@
   #controls button { flex:1; border:0; border-radius:12px; background:var(--soft); color:var(--ink);
     font-weight:800; font-size:14px; letter-spacing:.4px; cursor:pointer; font-family:inherit; }
   #controls #doneBtn { flex:2; background:var(--accent); color:#fff; }
+  #controls #junkBtn { color:var(--blocked); }
 
   /* ===== END CARD ===== */
   #endCard { position:absolute; left:0; right:0; bottom:0; z-index:30; background:var(--paper);
@@ -250,6 +251,7 @@
   </div>
   <div id="controls">
     <button id="skipBtn">Skip</button>
+    <button id="junkBtn">Junk</button>
     <button id="doneBtn">Done, log it</button>
   </div>
 
@@ -403,7 +405,7 @@ const PROFILE_KEY = 'campus_profile';
 function getProfile(){ return (safeGet(PROFILE_KEY) || 'default'); }
 function lastKey(){ return 'campus_last_' + getProfile(); }
 function courseKey(){ return 'campus_courses_' + getProfile(); }
-function recKey(){ return 'campus_rec_' + getProfile(); }
+function recKey(){ return 'campus_rec2_' + getProfile(); }
 function paintProfile(){ $('profileName').textContent = getProfile(); }
 function openSheet(){
   const p = getProfile();
@@ -493,14 +495,21 @@ const REC_STEPS = ['wall', 'course', 'credit', 'genre'];
 
 async function fetchJson(url){ const r = await fetch(url); return r.json(); }
 
+// Bucket names are your labels, not search terms. Junk style buckets never drive a recommendation.
+const JUNK_WORDS = /\b(trash|junk|garbage|crap|bad|skip|spam|useless|waste)\b/i;
+function genreSubject(genre){
+  const g = GENRES.find(x=>x.id===genre && x.subjects.length);
+  const pool = g ? g.subjects : allSubjects();
+  return pool[Math.floor(Math.random()*pool.length)];
+}
 async function recWall(){
   const d = await fetchJson(API_BASE + '/entries?profile=' + encodeURIComponent(getProfile()));
   const entries = d.entries || [];
   const passed = new Set(entries.filter(e=>e.status==='built' || e.status==='followed').map(e=>e.video_id));
-  const wall = entries.find(e=>e.status==='blocked' && !passed.has(e.video_id));
+  const wall = entries.find(e=>e.status==='blocked' && !passed.has(e.video_id) && !JUNK_WORDS.test(e.bucket || ''));
   if (!wall) return null;
   return { kind:'wall', video:{ id:wall.video_id, title:wall.title, channel:wall.channel },
-    reason:'You hit a wall on this one. Give it another go.', q: wall.bucket, genre: wall.genre || 'general',
+    reason:'You hit a wall on this one. Give it another go.', q: wall.subject || genreSubject(wall.genre || 'general'), genre: wall.genre || 'general',
     meta:(wall.channel || '') + (wall.bucket ? '  ·  ' + wall.bucket : '') };
 }
 async function recCourse(){
@@ -532,26 +541,28 @@ async function recCourse(){
   return null;
 }
 async function searchFirstNew(q){
-  const d = await fetchJson(API_BASE + '/search?q=' + encodeURIComponent(q));
+  const d = await fetchJson(API_BASE + '/search?q=' + encodeURIComponent(q) + '&profile=' + encodeURIComponent(getProfile()));
   const logged = await fetchJson(API_BASE + '/entries?profile=' + encodeURIComponent(getProfile()));
   const done = new Set((logged.entries || []).map(e=>e.video_id));
   return (d.videos || []).find(v=>!done.has(v.id)) || null;
 }
 async function recCredit(){
   const t = await fetchJson(API_BASE + '/transcript?profile=' + encodeURIComponent(getProfile()));
-  const b = (t.buckets || []).filter(x=>x.toward_next > 0).sort((a,b)=>b.toward_next-a.toward_next)[0];
+  const b = (t.buckets || []).filter(x=>x.toward_next > 0 && !JUNK_WORDS.test(x.bucket || '')).sort((a,b)=>b.toward_next-a.toward_next)[0];
   if (!b) return null;
-  const v = await searchFirstNew(b.bucket);
+  // Search what you were studying when you logged into this bucket.
+  const e = await fetchJson(API_BASE + '/entries?profile=' + encodeURIComponent(getProfile()) + '&bucket=' + encodeURIComponent(b.bucket));
+  const withSubject = (e.entries || []).find(x=>x.subject && x.status !== 'blocked');
+  const subject = withSubject ? withSubject.subject : genreSubject(b.genre || 'general');
+  const v = await searchFirstNew(subject);
   if (!v) return null;
   const need = CREDIT_POINTS - b.toward_next;
-  return { kind:'credit', video:v, q:b.bucket, genre:b.genre || 'general',
+  return { kind:'credit', video:v, q:subject, genre:b.genre || 'general',
     reason:'Your ' + b.bucket + ' bucket is ' + need + ' point' + (need===1?'':'s') + ' from its next credit.',
     meta:(v.channel || '') };
 }
 async function recGenre(){
-  const g = GENRES.find(x=>x.id===currentGenre && x.subjects.length);
-  const pool = g ? g.subjects : allSubjects();
-  const q = pool[Math.floor(Math.random()*pool.length)];
+  const q = genreSubject(currentGenre);
   const v = await searchFirstNew(q);
   if (!v) return null;
   return { kind:'genre', video:v, q:q, genre:genreOfSubject(q) || 'general',
@@ -730,7 +741,7 @@ async function refillQueue(initial){
   while (queue.length < REFILL_AT && tries < 3){
     tries++;
     try{
-      const u = new URL(API_BASE + '/search'); u.searchParams.set('q', session.q);
+      const u = new URL(API_BASE + '/search'); u.searchParams.set('q', session.q); u.searchParams.set('profile', getProfile());
       const d = await fetchJson(u);
       if (d.videos && d.videos.length){
         const fresh = d.videos.filter(v=>!localSeen.has(v.id) && !queue.some(q=>q.id===v.id));
@@ -813,6 +824,14 @@ function recordSeen(v){
 }
 
 $('skipBtn').addEventListener('click', ()=>{ if(!cardOpen) nextVideo(); });
+// Junk throws the video out and keeps its channel out of your searches from now on.
+$('junkBtn').addEventListener('click', ()=>{
+  if (cardOpen || !nowPlaying) return;
+  fetch(API_BASE + '/junk', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ video_id: nowPlaying.id, channel_id: nowPlaying.channel_id || null, title: nowPlaying.title, profile: getProfile() }) }).catch(()=>{});
+  setJSON(recKey(), null);
+  nextVideo();
+});
 $('doneBtn').addEventListener('click', ()=>{ try{player.pauseVideo();}catch(e){} openEndCard(); });
 $('menuBtn').addEventListener('click', goHome);
 $('openYtBtn').addEventListener('click', openCurrentOnYouTube);
@@ -871,6 +890,7 @@ $('bankBtn').addEventListener('click', ()=>{
       note: $('noteInput').value,
       project_link: $('linkInput').value,
       source_kind: session.mode,
+      subject: session.mode === 'course' ? session.ctx : session.q,
       genre: chosenGenre,
       profile: getProfile()
     }) }).catch(()=>{});
